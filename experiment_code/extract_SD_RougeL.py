@@ -50,7 +50,7 @@ elif args.dataset == 'pubmedqa':
 elif args.dataset == 'medexqa':
     dataset = datasets.load_from_disk(f'{config.data_dir}/medexqa_test_dataset')    
 dataset_df = dataset.to_pandas()
-    
+
 correct_all_list = []
 average_contradict_prob_all_list = []
 average_neg_log_likelihood_beam_search_all_list = []
@@ -151,93 +151,87 @@ def get_likelihoods_df(average_contradict_prob_list, semantic_density_list):
     return likelihoods_df, sequence_embeddings
 
 run_ids_to_analyze = args.run_ids if len(args.run_ids)!=0 else [0,]
-run_id = 0
 result_df_list = []
 
+print(run_ids_to_analyze)
 for beam_id in range(10):
-#     for run_id in run_ids_to_analyze:
+    for run_id in run_ids_to_analyze:
 #         print("GOOD MORNING")
         
-    print('beam_group_{}'.format(beam_id))
-    similarities_df = get_similarities_df()
-    generations_df = get_generations_df()
-    num_generations = len(generations_df['generated_texts'][0])
-    likelihoods_df, sequence_embeddings = get_likelihoods_df(average_contradict_prob_list, semantic_density_list)
-    result_df = generations_df.merge(similarities_df, on='id').merge(likelihoods_df, on='id').dropna(subset=['predictive_entropy_over_concepts', 'average_predictive_entropy', 'average_neg_log_likelihood_of_most_likely_gen', 'average_neg_log_likelihood_of_second_most_likely_gen'])
+        print('beam_group_{}'.format(beam_id))
+        similarities_df = get_similarities_df()
+        generations_df = get_generations_df()
+        num_generations = len(generations_df['generated_texts'][0])
+        likelihoods_df, sequence_embeddings = get_likelihoods_df(average_contradict_prob_list, semantic_density_list)
+        result_df = generations_df.merge(similarities_df, on='id').merge(likelihoods_df, on='id').dropna(subset=['predictive_entropy_over_concepts', 'average_predictive_entropy', 'average_neg_log_likelihood_of_most_likely_gen', 'average_neg_log_likelihood_of_second_most_likely_gen'])
+        
+        print(result_df['correct'].value_counts())
 
-    print(result_df['correct'].value_counts())
+        n_samples_before_filtering = len(result_df)
+        result_df['len_most_likely_generation_length'] = result_df['most_likely_generation'].apply(lambda x: len(x.split()))
 
-    n_samples_before_filtering = len(result_df)
-    result_df['len_most_likely_generation_length'] = result_df['most_likely_generation'].apply(lambda x: len(x.split()))
+        # Begin analysis
+        result_dict = {}
+        result_dict['accuracy'] = result_df['correct'].mean() if len(result_df['correct']) != 0 else 0.0
 
-    # Begin analysis
-    result_dict = {}
-    result_dict['accuracy'] = result_df['correct'].mean() if len(result_df['correct']==1) != 0 else 0.0
 
-    # Compute AUROCs with safety check
-    result_dict['average_contradict_prob_auroc'] = safe_auroc(result_df['correct'], result_df['average_contradict_prob'])
+        # Load likelihoods
+        with open(f'{config.output_dir}/{model_name}_generations_{model_name}_likelihoods_all_{args.dataset}_temperature{args.temperature}.pkl', 'rb') as infile:
+            likelihoods_all = pickle.load(infile)
 
-    # Load likelihoods
-    with open(f'{config.output_dir}/{model_name}_generations_{model_name}_likelihoods_all_{args.dataset}_temperature{args.temperature}.pkl', 'rb') as infile:
-        likelihoods_all = pickle.load(infile)
+        # Extract likelihoods
+        average_neg_log_likelihood_beam_search_list = [
+            likelihoods_all[index_tmp][f'average_neg_log_likelihood_of_beam_search_gen_{beam_id}'].cpu()
+            for index_tmp in result_df.index
+        ]
 
-    # Extract likelihoods
-    average_neg_log_likelihood_beam_search_list = [
-        likelihoods_all[index_tmp][f'average_neg_log_likelihood_of_beam_search_gen_{beam_id}'].cpu()
-        for index_tmp in result_df.index
-    ]
+        result_dict['average_neg_log_likelihood_auroc'] = safe_auroc(result_df['correct'], average_neg_log_likelihood_beam_search_list)
 
-    result_dict['average_neg_log_likelihood_auroc'] = safe_auroc(result_df['correct'], average_neg_log_likelihood_beam_search_list)
-# average_contradict_prob semantic_density_auroc ln_predictive_entropy_auroc predictive_entropy_auroc entropy_over_concepts_auroc predictive_entropy_over_concepts
-# ['Deg', 'SD', 'NE', 'PE', 'SE', ]
-    # Compute ROC curves (only when valid)
-    if sum(result_df['correct']==1) != 0:
+        # Compute ROC curves (only when valid)
         roc_curve_list = []
         if len(set(1 - np.array(result_df['correct']))) > 1:
             roc_curve_list.append(sklearn.metrics.roc_curve(1 - result_df['correct'], result_df['average_contradict_prob']))
+
         result_dict['semantic_density_auroc'] = safe_auroc(result_df['correct'], 1 - result_df['semantic_density'])
         if len(set(1 - np.array(result_df['correct']))) > 1:
             roc_curve_list.append(sklearn.metrics.roc_curve(1 - result_df['correct'], 1 - result_df['semantic_density']))
-            roc_curve_list.append(sklearn.metrics.roc_curve(1 - result_df['correct'], 1 - result_df['average_predictive_entropy']))
-            roc_curve_list.append(sklearn.metrics.roc_curve(1 - result_df['correct'], 1 - result_df['predictive_entropy']))
-            roc_curve_list.append(sklearn.metrics.roc_curve(1 - result_df['correct'], 1 - result_df['predictive_entropy_over_concepts']))
-            roc_curve_list.append(sklearn.metrics.roc_curve(1 - result_df['correct'], 1 - np.array(average_neg_log_likelihood_beam_search_list)))
-#         if len(set(1 - np.array(result_df['correct']))) > 1:
-#             roc_curve_list.append(sklearn.metrics.roc_curve(1 - result_df['correct'], result_df['predictive_entropy_over_concepts']))
+
+        # Compute AUROC for entropy measures
+        result_dict['ln_predictive_entropy_auroc'] = safe_auroc(result_df['correct'], result_df['average_predictive_entropy'])
+        result_dict['predictive_entropy_auroc'] = safe_auroc(result_df['correct'], result_df['predictive_entropy'])
+        result_dict['entropy_over_concepts_auroc'] = safe_auroc(result_df['correct'], result_df['predictive_entropy_over_concepts'])
+
+        if len(set(1 - np.array(result_df['correct']))) > 1:
+            roc_curve_list.append(sklearn.metrics.roc_curve(1 - result_df['correct'], result_df['predictive_entropy_over_concepts']))
+
         # Save ROC curves safely
         with open(f'{config.result_dir}/roc_curve_{model_name}_{args.dataset}_10sample_beam5.pkl', 'wb') as f:
             pickle.dump(roc_curve_list, f)
-        break
 
-    # Compute AUROC for entropy measures
-    result_dict['ln_predictive_entropy_auroc'] = safe_auroc(result_df['correct'], result_df['average_predictive_entropy'])
-    result_dict['predictive_entropy_auroc'] = safe_auroc(result_df['correct'], result_df['predictive_entropy'])
-    result_dict['entropy_over_concepts_auroc'] = safe_auroc(result_df['correct'], result_df['predictive_entropy_over_concepts'])
+        # Additional AUROCs
+        if 'unnormalised_entropy_over_concepts' in result_df.columns:
+            result_dict['unnormalised_entropy_over_concepts_auroc'] = safe_auroc(result_df['correct'], result_df['unnormalised_entropy_over_concepts'])
 
-    # Additional AUROCs
-    if 'unnormalised_entropy_over_concepts' in result_df.columns:
-        result_dict['unnormalised_entropy_over_concepts_auroc'] = safe_auroc(result_df['correct'], result_df['unnormalised_entropy_over_concepts'])
+        aurocs_across_models.append(result_dict['entropy_over_concepts_auroc'])
 
-    aurocs_across_models.append(result_dict['entropy_over_concepts_auroc'])
+        result_dict['neg_llh_most_likely_gen_auroc'] = safe_auroc(result_df['correct'], result_df['neg_log_likelihood_of_most_likely_gen'])
+        result_dict['number_of_semantic_sets_auroc'] = safe_auroc(result_df['correct'], result_df['number_of_semantic_sets'])
 
-    result_dict['neg_llh_most_likely_gen_auroc'] = safe_auroc(result_df['correct'], result_df['neg_log_likelihood_of_most_likely_gen'])
-    result_dict['number_of_semantic_sets_auroc'] = safe_auroc(result_df['correct'], result_df['number_of_semantic_sets'])
+        # Compute means safely
+        result_dict['number_of_semantic_sets_correct'] = result_df[result_df['correct'] == 1]['number_of_semantic_sets'].mean() if len(result_df[result_df['correct'] == 1]['number_of_semantic_sets']) != 0 else 0.0
+        result_dict['number_of_semantic_sets_incorrect'] = result_df[result_df['correct'] == 0]['number_of_semantic_sets'].mean() if len(result_df[result_df['correct'] == 0]['number_of_semantic_sets']) != 0 else 0.0
 
-    # Compute means safely
-    result_dict['number_of_semantic_sets_correct'] = result_df[result_df['correct'] == 1]['number_of_semantic_sets'].mean() if len(result_df[result_df['correct'] == 1]['number_of_semantic_sets']) != 0 else 0.0
-    result_dict['number_of_semantic_sets_incorrect'] = result_df[result_df['correct'] == 0]['number_of_semantic_sets'].mean() if len(result_df[result_df['correct'] == 0]['number_of_semantic_sets']) != 0 else 0.0
+        result_dict['average_rougeL_among_generations'] = result_df['rougeL_among_generations'].mean() if len(result_df['rougeL_among_generations']) != 0 else 0.0
+        result_dict['average_rougeL_among_generations_correct'] = result_df[result_df['correct'] == 1]['rougeL_among_generations'].mean() if len(result_df[result_df['correct'] == 1]['rougeL_among_generations']) != 0 else 0.0
+        result_dict['average_rougeL_among_generations_incorrect'] = result_df[result_df['correct'] == 0]['rougeL_among_generations'].mean() if len(result_df[result_df['correct'] == 0]['rougeL_among_generations']) != 0 else 0.0
 
-    result_dict['average_rougeL_among_generations'] = result_df['rougeL_among_generations'].mean() if len(result_df['rougeL_among_generations']) != 0 else 0.0
-    result_dict['average_rougeL_among_generations_correct'] = result_df[result_df['correct'] == 1]['rougeL_among_generations'].mean() if len(result_df[result_df['correct'] == 1]['rougeL_among_generations']) != 0 else 0.0
-    result_dict['average_rougeL_among_generations_incorrect'] = result_df[result_df['correct'] == 0]['rougeL_among_generations'].mean() if len(result_df[result_df['correct'] == 0]['rougeL_among_generations']) != 0 else 0.0
+        result_dict['average_rougeL_auroc'] = safe_auroc(result_df['correct'], result_df['rougeL_among_generations'])
 
-    result_dict['average_rougeL_auroc'] = safe_auroc(result_df['correct'], result_df['rougeL_among_generations'])
+        result_dict['average_neg_llh_most_likely_gen_auroc'] = safe_auroc(result_df['correct'], result_df['average_neg_log_likelihood_of_most_likely_gen'])
+        result_dict['rougeL_based_accuracy'] = result_dict['accuracy']
 
-    result_dict['average_neg_llh_most_likely_gen_auroc'] = safe_auroc(result_df['correct'], result_df['average_neg_log_likelihood_of_most_likely_gen'])
-    result_dict['rougeL_based_accuracy'] = result_dict['accuracy']
-
-    result_dict['margin_measure_auroc'] = safe_auroc(result_df['correct'], 
-        result_df['average_neg_log_likelihood_of_most_likely_gen'] + result_df['average_neg_log_likelihood_of_second_most_likely_gen'])
+        result_dict['margin_measure_auroc'] = safe_auroc(result_df['correct'], 
+            result_df['average_neg_log_likelihood_of_most_likely_gen'] + result_df['average_neg_log_likelihood_of_second_most_likely_gen'])
 
 #         # Compute the auroc for semantic density
 #         if len(set(result_df['correct'].tolist())) < 2:  # If y_true contains only one class
@@ -316,71 +310,71 @@ for beam_id in range(10):
 #             1 - result_df['correct'], result_df['average_neg_log_likelihood_of_most_likely_gen'] +
 #             result_df['average_neg_log_likelihood_of_second_most_likely_gen'])
 
-    if args.verbose:
-        print('ln_predictive_entropy_auroc', ln_predictive_entropy_auroc)
-        print('semantci entropy auroc', entropy_over_concepts_auroc)
-        print('average_log_likelihood_auroc', average_log_likelihood_auroc)
-        print('average_contradict_prob_auroc', average_contradict_prob_auroc)
-        print('semantic_density_auroc', semantic_density_auroc)
-        print(
-            'Semantic entropy +',
-            sklearn.metrics.roc_auc_score(
-                1 - result_df['correct'],
-                result_df['predictive_entropy_over_concepts'] - 3 * result_df['rougeL_among_generations']))
-        print('RougeL among generations auroc',
-              sklearn.metrics.roc_auc_score(result_df['correct'], result_df['rougeL_among_generations']))
-        print('margin measure auroc:', result_dict['margin_measure_auroc'])
-        print('accuracy:', result_dict['accuracy'])
-    # Measure AUROCs across different numbers of generations
-    ln_aurocs = []
-    aurocs = []
-    semantic_aurocs = []
-    average_number_of_semantic_sets = []
-    average_number_of_semantic_sets_correct = []
-    average_number_of_semantic_sets_incorrect = []
+        if args.verbose:
+            print('ln_predictive_entropy_auroc', ln_predictive_entropy_auroc)
+            print('semantci entropy auroc', entropy_over_concepts_auroc)
+            print('average_log_likelihood_auroc', average_log_likelihood_auroc)
+            print('average_contradict_prob_auroc', average_contradict_prob_auroc)
+            print('semantic_density_auroc', semantic_density_auroc)
+            print(
+                'Semantic entropy +',
+                sklearn.metrics.roc_auc_score(
+                    1 - result_df['correct'],
+                    result_df['predictive_entropy_over_concepts'] - 3 * result_df['rougeL_among_generations']))
+            print('RougeL among generations auroc',
+                  sklearn.metrics.roc_auc_score(result_df['correct'], result_df['rougeL_among_generations']))
+            print('margin measure auroc:', result_dict['margin_measure_auroc'])
+            print('accuracy:', result_dict['accuracy'])
+        # Measure AUROCs across different numbers of generations
+        ln_aurocs = []
+        aurocs = []
+        semantic_aurocs = []
+        average_number_of_semantic_sets = []
+        average_number_of_semantic_sets_correct = []
+        average_number_of_semantic_sets_incorrect = []
 
-    for i in range(1, num_generations + 1):
-        ln_aurocs.append(safe_auroc(result_df['correct'], result_df[f'average_predictive_entropy_on_subset_{i}']))
-        aurocs.append(safe_auroc(result_df['correct'], result_df[f'predictive_entropy_on_subset_{i}']))
-        semantic_aurocs.append(safe_auroc(result_df['correct'], result_df[f'semantic_predictive_entropy_on_subset_{i}']))
+        for i in range(1, num_generations + 1):
+            ln_aurocs.append(safe_auroc(result_df['correct'], result_df[f'average_predictive_entropy_on_subset_{i}']))
+            aurocs.append(safe_auroc(result_df['correct'], result_df[f'predictive_entropy_on_subset_{i}']))
+            semantic_aurocs.append(safe_auroc(result_df['correct'], result_df[f'semantic_predictive_entropy_on_subset_{i}']))
 
-        average_number_of_semantic_sets.append(result_df[f'number_of_semantic_sets_on_subset_{i}'].mean() if len(result_df[f'number_of_semantic_sets_on_subset_{i}']) != 0 else 0.0)
-        average_number_of_semantic_sets_correct.append(result_df[result_df['correct'] == 1][f'number_of_semantic_sets_on_subset_{i}'].mean() if len(result_df[result_df['correct'] == 1][f'number_of_semantic_sets_on_subset_{i}']) != 0 else 0.0)
-        average_number_of_semantic_sets_incorrect.append(result_df[result_df['correct'] == 0][f'number_of_semantic_sets_on_subset_{i}'].mean() if len(result_df[result_df['correct'] == 0][f'number_of_semantic_sets_on_subset_{i}']) != 0 else 0.0)
+            average_number_of_semantic_sets.append(result_df[f'number_of_semantic_sets_on_subset_{i}'].mean() if len(result_df[f'number_of_semantic_sets_on_subset_{i}']) != 0 else 0.0)
+            average_number_of_semantic_sets_correct.append(result_df[result_df['correct'] == 1][f'number_of_semantic_sets_on_subset_{i}'].mean() if len(result_df[result_df['correct'] == 1][f'number_of_semantic_sets_on_subset_{i}']) != 0 else 0.0)
+            average_number_of_semantic_sets_incorrect.append(result_df[result_df['correct'] == 0][f'number_of_semantic_sets_on_subset_{i}'].mean() if len(result_df[result_df['correct'] == 0][f'number_of_semantic_sets_on_subset_{i}']) != 0 else 0.0)
 
-    # Store results in result_dict
-    result_dict['ln_predictive_entropy_auroc_on_subsets'] = ln_aurocs
-    result_dict['predictive_entropy_auroc_on_subsets'] = aurocs
-    result_dict['semantic_predictive_entropy_auroc_on_subsets'] = semantic_aurocs
-    result_dict['average_number_of_semantic_sets_on_subsets'] = average_number_of_semantic_sets
-    result_dict['average_number_of_semantic_sets_on_subsets_correct'] = average_number_of_semantic_sets_correct
-    result_dict['average_number_of_semantic_sets_on_subsets_incorrect'] = average_number_of_semantic_sets_incorrect
-    result_dict['model_name'] = model_name
+        # Store results in result_dict
+        result_dict['ln_predictive_entropy_auroc_on_subsets'] = ln_aurocs
+        result_dict['predictive_entropy_auroc_on_subsets'] = aurocs
+        result_dict['semantic_predictive_entropy_auroc_on_subsets'] = semantic_aurocs
+        result_dict['average_number_of_semantic_sets_on_subsets'] = average_number_of_semantic_sets
+        result_dict['average_number_of_semantic_sets_on_subsets_correct'] = average_number_of_semantic_sets_correct
+        result_dict['average_number_of_semantic_sets_on_subsets_incorrect'] = average_number_of_semantic_sets_incorrect
+        result_dict['model_name'] = model_name
 
-    # Store per-beam results
-    overall_result_dict[f'beam_{beam_id}'] = result_dict
-    sequence_embeddings_dict[run_id] = sequence_embeddings
+        # Store per-beam results
+        overall_result_dict[f'beam_{beam_id}'] = result_dict
+        sequence_embeddings_dict[run_id] = sequence_embeddings
 
-    # Free GPU memory
-    torch.cuda.empty_cache()
+        # Free GPU memory
+        torch.cuda.empty_cache()
 
-    # Aggregate lists across iterations
-    correct_all_list += result_df['correct'].to_list()
-    average_contradict_prob_all_list += result_df['average_contradict_prob'].to_list()
-    average_neg_log_likelihood_beam_search_all_list += average_neg_log_likelihood_beam_search_list
-    semantic_density_all_list += result_df['semantic_density'].to_list()
-    average_predictive_entropy_all_list += result_df['average_predictive_entropy'].to_list()
-    predictive_entropy_all_list += result_df['predictive_entropy'].to_list()
-    predictive_entropy_over_concepts_all_list += result_df['predictive_entropy_over_concepts'].to_list()
-    rougeL_among_generations_all_list += result_df['rougeL_among_generations'].to_list()
-
-    print(result_df.describe())
-    result_df_list.append(result_df)
+        # Aggregate lists across iterations
+        correct_all_list += result_df['correct'].to_list()
+        average_contradict_prob_all_list += result_df['average_contradict_prob'].to_list()
+        average_neg_log_likelihood_beam_search_all_list += average_neg_log_likelihood_beam_search_list
+        semantic_density_all_list += result_df['semantic_density'].to_list()
+        average_predictive_entropy_all_list += result_df['average_predictive_entropy'].to_list()
+        predictive_entropy_all_list += result_df['predictive_entropy'].to_list()
+        predictive_entropy_over_concepts_all_list += result_df['predictive_entropy_over_concepts'].to_list()
+        rougeL_among_generations_all_list += result_df['rougeL_among_generations'].to_list()
         
+        print(result_df.describe())
+        result_df_list.append(result_df)
+
 # Final result_dict with safe AUROC calculations
 print(correct_all_list)
 result_dict = {}
-# result_dict['semantic_density'] = semantic_density_all_list
+result_dict['semantic_density'] = semantic_density_all_list
 result_dict['accuracy'] = np.mean(correct_all_list) if len(correct_all_list) != 0 else 0.0
 result_dict['average_contradict_prob_auroc'] = safe_auroc(correct_all_list, average_contradict_prob_all_list)
 result_dict['semantic_density_auroc'] = safe_auroc(correct_all_list, 1 - np.array(semantic_density_all_list))
@@ -453,8 +447,8 @@ result_dict['average_rougeL_auroc'] = safe_auroc(correct_all_list, 1 - np.array(
 #                                                             1 - np.array(rougeL_among_generations_all_list))
 overall_result_dict['beam_all'] = result_dict
 print(result_dict)
-# with open(f'{config.result_dir}/overall_results_beam_search_SD_{args.model}_{args.dataset}_temperature{args.temperature}.pkl', 'wb') as f:
-#     pickle.dump(overall_result_dict, f)
+with open(f'{config.result_dir}/overall_results_beam_search_SD_{args.model}_{args.dataset}_temperature{args.temperature}.pkl', 'wb') as f:
+    pickle.dump(overall_result_dict, f)
 
 # with open(f'{config.output_dir}/sequence_embeddings_{model_name}_{args.dataset}.pkl', 'wb') as f:
 #     pickle.dump(sequence_embeddings_dict, f)

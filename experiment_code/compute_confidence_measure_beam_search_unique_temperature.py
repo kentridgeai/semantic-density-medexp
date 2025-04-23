@@ -14,7 +14,7 @@ parser.add_argument('--temperature', type=float, default=1.0)
 parser.add_argument('--cuda_device', type=str, default="0")
 args = parser.parse_args()
 
-os.environ["CUDA_VISIBLE_DEVICES"]=args.cuda_device
+# os.environ["CUDA_VISIBLE_DEVICES"]=args.cuda_device
 
 import config
 import numpy as np
@@ -22,7 +22,7 @@ import torch
 #import wandb
 
 
-device = 'cuda'
+device = f"cuda:{args.cuda_device}" if torch.cuda.is_available() and args.cuda_device != '-1' else 'cpu'
 
 # Set a seed value
 seed_value = 3
@@ -68,7 +68,7 @@ def get_overall_log_likelihoods(list_of_results):
             results_per_model = []
             for sample in result:
                 average_neg_log_likelihoods = sample[key]
-                list_of_ids.append(sample['id'][0])
+                list_of_ids.append(sample['id'])
                 results_per_model.append(average_neg_log_likelihoods)
 
             results_per_model = torch.stack(results_per_model)
@@ -158,18 +158,19 @@ def add_neg_log_likelihood_of_beam_search(sequences):
         samples = pickle.load(infile)
 
     mistralai_models = ['Mistral-7B-v0.1', 'Mixtral-8x7B-v0.1', 'Mixtral-8x22B-v0.1']
-    llama_models = ['Llama-2-13b-hf', 'Llama-2-70b-hf', 'Meta-Llama-3-8B', 'Meta-Llama-3-8B-Instruct', 'Meta-Llama-3-70B', 'Meta-Llama-3-70B-Instruct']
-
+    llama_models = ['Llama-2-13b-hf', 'Llama-2-70b-hf', 'Meta-Llama-3-8B', 'Meta-Llama-3-8B-Instruct', 'Meta-Llama-3-70B', 'Llama-2-7b-hf']
+    SUPPORTED_OTHER_LMS = ['phi3', 'meerkat7b']
     if f"{args.evaluation_model}" in mistralai_models:
         hf_model_dir = 'mistralai/' + f"{args.evaluation_model}"
 
     if f"{args.evaluation_model}" in llama_models:
         hf_model_dir = 'meta-llama/' + f"{args.evaluation_model}"
-
+    if f"{args.evaluation_model}" in SUPPORTED_OTHER_LMS:
+        hf_model_dir = "dmis-lab/meerkat-7b-v1.0" if "meerkat" in args.evaluation_model else "microsoft/phi-3-mini-4k-instruct"
     tokenizer = AutoTokenizer.from_pretrained(hf_model_dir,
                                               use_fast=False,
                                               cache_dir=config.data_dir)
-    tokenizer.pad_token_id = 1
+    tokenizer.pad_token = tokenizer.eos_token
     for i in range(len(samples)):
         sample = samples[i]
         sequence = sequences[i]

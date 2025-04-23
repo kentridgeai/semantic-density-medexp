@@ -54,7 +54,10 @@ device_map = {
     'lm_head': 1
 }
 
-data_dir = ''
-hf_datasets_cache = ''
-output_dir = ''
-hf_cache_dir = ''
+data_dir = '' #'/workspace/sde_uq'
+hf_datasets_cache = ''    #'/workspace/tmp'
+output_dir =  ''  #'/workspace/sde_uq/outputs'
+result_dir =  ''  #'/workspace/sde_uq/results'
+paper_dir =   ''  #'/workspace/sde_uq/paper_results'
+hf_cache_dir = '' #'/workspace/tmp'
+device =  'cuda'

@@ -4,7 +4,7 @@ import os
 import pickle
 import random
 
-os.environ["CUDA_VISIBLE_DEVICES"]="0"
+# os.environ["CUDA_VISIBLE_DEVICES"]="0"
 
 import evaluate
 import numpy as np
@@ -18,8 +18,10 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--generation_model', type=str, default='opt-350m')
 parser.add_argument('--run_id', type=str, default='run_1')
 parser.add_argument('--dataset', type=str, default='NQ')
+parser.add_argument('--device', type=str, default='0')
 args = parser.parse_args()
 
+device = torch.device('cuda:{}'.format(args.device)) if torch.cuda.is_available() and args.device!='-1' else torch.device('cpu')
 
 # Set a seed value
 seed_value = 3
@@ -39,26 +41,29 @@ torch.manual_seed(seed_value)
 os.environ["HF_DATASETS_CACHE"] = config.hf_datasets_cache
 
 mistralai_models = ['Mistral-7B-v0.1', 'Mixtral-8x7B-v0.1', 'Mixtral-8x22B-v0.1']
-llama_models = ['Llama-2-13b-hf', 'Llama-2-70b-hf', 'Meta-Llama-3-8B', 'Meta-Llama-3-8B-Instruct', 'Meta-Llama-3-70B', 'Meta-Llama-3-70B-Instruct']
+llama_models = ['Llama-2-13b-hf', 'Llama-2-70b-hf', 'Meta-Llama-3-8B', 'Meta-Llama-3-8B-Instruct', 'Meta-Llama-3-70B, Llama-2-7b-hf']
+SUPPORTED_OTHER_LMS = ['phi3', 'meerkat7b']
 
+if f"{args.generation_model}" in SUPPORTED_OTHER_LMS:
+    hf_model_dir = 'dmis-lab/meerkat-7b-v1.0' if 'meerkat' in args.generation_model else "microsoft/phi-3-mini-4k-instruct"
+    
 if f"{args.generation_model}" in mistralai_models:
     hf_model_dir = 'mistralai/' + f"{args.generation_model}"
 
 if f"{args.generation_model}" in llama_models:
     hf_model_dir = 'meta-llama/' + f"{args.generation_model}"
 
-generation_tokenizer = AutoTokenizer.from_pretrained(hf_model_dir, use_fast=False, cache_dir=config.data_dir)
+# generation_tokenizer = AutoTokenizer.from_pretrained(hf_model_dir, use_fast=False, cache_dir=config.data_dir)
 
 tokenizer = AutoTokenizer.from_pretrained("microsoft/deberta-large-mnli")
-model0 = AutoModelForSequenceClassification.from_pretrained("microsoft/deberta-large-mnli").to('cuda:0')
-
+model0 = AutoModelForSequenceClassification.from_pretrained("microsoft/deberta-large-mnli").to(device)
 
 with open(f'{config.output_dir}/{args.generation_model}_generations_all_{args.dataset}.pkl', 'rb') as infile:
     sequences = pickle.load(infile)
 
 result_dict = {}
 
-meteor = evaluate.load('meteor')
+# meteor = evaluate.load('meteor')
 
 deberta_predictions = []
 
@@ -73,9 +78,9 @@ for sample in tqdm(sequences):
         generated_texts.append(sample['cleaned_beam_search_generation_{}'.format(beam_index)])
 
     id_ = sample['id'][0]
-
+    print(id_, sample['id'])
     unique_generated_texts = list(set(generated_texts))
-
+    break
     answer_list_1 = []
     answer_list_2 = []
     has_semantically_different_answers = False
@@ -106,12 +111,12 @@ for sample in tqdm(sequences):
                 origin_input = qa_1 + ' [SEP] ' + qa_2
                 inputs.append(origin_input)
                 encoded_input = tokenizer.encode(origin_input, padding=True)
-                prediction = model0(torch.tensor(torch.tensor([encoded_input]), device='cuda:0'))['logits']
+                prediction = model0(torch.tensor(torch.tensor([encoded_input]), device=device))['logits']
                 predicted_label = torch.argmax(prediction, dim=1)
 
                 reverse_input = qa_2 + ' [SEP] ' + qa_1
                 encoded_reverse_input = tokenizer.encode(reverse_input, padding=True)
-                reverse_prediction = model0(torch.tensor(torch.tensor([encoded_reverse_input]), device='cuda:0'))['logits']
+                reverse_prediction = model0(torch.tensor(torch.tensor([encoded_reverse_input]), device=device))['logits']
                 reverse_predicted_label = torch.argmax(reverse_prediction, dim=1)
 
                 deberta_prediction = 1
@@ -138,7 +143,7 @@ for sample in tqdm(sequences):
         results = rouge.compute(predictions=answer_list_1, references=answer_list_2)
 
         for rouge_type in rouge_types:
-            syntactic_similarities[rouge_type] = results[rouge_type].mid.fmeasure
+            syntactic_similarities[rouge_type] = results[rouge_type]
 
     result_dict[id_] = {
         'syntactic_similarities': syntactic_similarities,

@@ -17,9 +17,8 @@ parser.add_argument('--top_p', type=float, default=1.0)
 parser.add_argument('--dataset', type=str, default='coqa')
 parser.add_argument('--cuda_device', type=str, default='0')
 args = parser.parse_args()
-os.environ["CUDA_VISIBLE_DEVICES"]=args.cuda_device
 
-import accelerate
+# import accelerate
 import config
 import datasets
 import evaluate
@@ -28,7 +27,8 @@ import torch
 import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig
 
-device = 'cuda'
+
+device = f"cuda:{args.cuda_device}" if torch.cuda.is_available() or args_cuda_device != '-1' else 'cpu'
 
 print(torch.cuda.device_count())
 print(torch.cuda.is_available())
@@ -53,7 +53,7 @@ torch.manual_seed(seed_value)
 os.environ["HF_DATASETS_CACHE"] = config.hf_datasets_cache
 
 mistralai_models = ['Mistral-7B-v0.1', 'Mixtral-8x7B-v0.1', 'Mixtral-8x22B-v0.1']
-llama_models = ['Llama-2-13b-hf', 'Llama-2-70b-hf', 'Meta-Llama-3-8B', 'Meta-Llama-3-8B-Instruct', 'Meta-Llama-3-70B', 'Meta-Llama-3-70B-Instruct']
+llama_models = ['Llama-2-13b-hf', 'Llama-2-70b-hf', 'Meta-Llama-3-8B', 'Meta-Llama-3-8B-Instruct', 'Meta-Llama-3-70B']
 
 if f"{args.model}" in mistralai_models:
     hf_model_dir = 'mistralai/' + f"{args.model}"
@@ -61,47 +61,88 @@ if f"{args.model}" in mistralai_models:
 if f"{args.model}" in llama_models:
     hf_model_dir = 'meta-llama/' + f"{args.model}"
 
-
 print("before loading model")
-tokenizer = AutoTokenizer.from_pretrained(hf_model_dir, use_fast=False, cache_dir=config.hf_cache_dir)
+# tokenizer = AutoTokenizer.from_pretrained(hf_model_dir, use_fast=False, cache_dir=config.hf_cache_dir)
+tokenizer = AutoTokenizer.from_pretrained(hf_model_dir, use_fast=False, cache_dir=config.hf_cache_dir, padding_side='left')
+tokenizer.pad_token = tokenizer.eos_token
+
 model = AutoModelForCausalLM.from_pretrained(hf_model_dir,
                                              torch_dtype=torch.float16,
-                                             cache_dir=config.hf_cache_dir, device_map="auto") #, max_memory={0: "2GiB", 1: "10GiB", 2: "10GiB", 3: "10GiB",
-#             4: "10GiB", 5: "10GiB", 6: "10GiB", 7: "10GiB",})
+                                             cache_dir=config.hf_cache_dir)
+#                                              cache_dir=config.hf_cache_dir, device_map="auto")
+model.config.pad_token_id = model.config.eos_token_id
+model.to(device)
 
-
-opt_models = ['opt-125m', 'opt-350m', 'opt-1.3b', 'opt-2.7b', 'opt-6.7b', 'opt-13b', 'opt-30b']
-
-with open(f'{config.data_dir}/{args.dataset}_{args.model}.pkl', 'rb') as dataset_file:
-    dataset = pickle.load(dataset_file)
-
+if args.dataset == 'coqa':
+    dataset = datasets.load_from_disk(f'{config.data_dir}/coqa_dataset')
+    id_to_question_mapping = dict(zip(dataset['id'], dataset['question']))
+elif args.dataset == 'pubmedqa':
+    dataset = datasets.load_from_disk(f'{config.data_dir}/pubmedqa_test_dataset')
+    id_to_question_mapping = dict(zip(dataset['id'], dataset['question']))    
+elif args.dataset == 'trivia_qa':
+    dataset = datasets.load_from_disk(f'{config.data_dir}/trivia_qa_{args.model}')
 
 if args.fraction_of_data_to_use < 1.0:
-    dataset = dataset[0:int(len(dataset)*args.fraction_of_data_to_use)]
-print(len(dataset))
+    train_dataset = dataset.train_test_split(test_size=(1 - args.fraction_of_data_to_use), seed=seed_value)['train']
+else:
+    train_dataset = dataset
 
 
-period_token_id = tokenizer('. ')['input_ids'][1]
+def encode(examples):
+    if 'Meta-Llama-3' in args.model:
+        return tokenizer(examples['story'] + ' Q: ' + examples['question'] + ' A: ', truncation=False, padding=False)
+    else:
+        return tokenizer(examples['story'] + ' Q: ' + examples['question'] + ' A:', truncation=False, padding=False)
+
+
+def encode_and_format_dataset(dataset):
+    dataset = dataset.map(encode, batched=False, load_from_cache_file=False)
+    dataset.set_format(type='torch', columns=['input_ids', 'attention_mask'], output_all_columns=True)
+
+    return dataset
+
+
+if args.dataset == 'coqa' or args.dataset == 'pubmedqa':
+    questions = encode_and_format_dataset(train_dataset)
+elif args.dataset == 'trivia_qa':
+    questions = train_dataset
+    question_id_set = set()
+
+dataloader = torch.utils.data.DataLoader(questions, batch_size=32)
+
 eos_tokens = ['Question:', ' Question:', '\n', 'Answer:', ' Answer:', 'Q:']
-question_framing_ids = [[tokenizer(eos_token)['input_ids'][1]] for eos_token in eos_tokens]
-squad_metric = evaluate.load("squad")
+if args.model in ['Meta-Llama-3-8B', 'Meta-Llama-3-70B']:
+    period_token_id = tokenizer('. ')['input_ids'][0]
+    question_framing_ids = [[tokenizer(eos_token)['input_ids'][0]] for eos_token in eos_tokens]
+else:
+    period_token_id = tokenizer('. ')['input_ids'][1]
+    question_framing_ids = [[tokenizer(eos_token)['input_ids'][1]] for eos_token in eos_tokens]
+# squad_metric = evaluate.load("squad")
 rouge = evaluate.load('rouge')
 exact_match_metric = evaluate.load("exact_match")
 
 print(args)
+
 def get_generations(model, dataloader, number_of_generations):
     """For a given model, produce a number of generation """
 
     with torch.no_grad():
         max_length_of_generated_sequence = 32
         sequences = []
-        id_counter = 0
         for batch in tqdm.tqdm(dataloader):
-            batch['question_id'] = [args.dataset + f'_{id_counter}']
-            id_counter += 1
-            input_ids = torch.tensor(batch['input_ids']).to(device).reshape(1, -1)
+#             print(batch)
+            
+            if args.dataset == 'trivia_qa':
+                if batch['question_id'][0] in question_id_set:
+                    continue
+                else:
+                    question_id_set.add(batch['question_id'][0])
+            input_ids = torch.cat(batch['input_ids']).to(device).reshape(
+                1, -1) if args.dataset == 'trivia_qa' else batch['input_ids'].to(device)
+            attention_mask = torch.cat(batch['attention_mask']).to(device).reshape(
+                1, -1) if args.dataset == 'trivia_qa' else batch['attention_mask'].to(device)            
             if args.decoding_method == 'beam_search':
-                most_likely_generation = model.generate(input_ids,
+                most_likely_generation = model.generate(input_ids=input_ids, attention_mask=attention_mask,
                                                         use_cache=True,
                                                         num_beams=num_beams,
                                                         num_return_sequences=num_beams,
@@ -121,7 +162,7 @@ def get_generations(model, dataloader, number_of_generations):
                                                         eos_token_id=period_token_id,
                                                         bad_words_ids=question_framing_ids)
 
-            input_length = input_ids.shape[1]
+            input_length = input_ids.shape[1] if args.dataset == 'trivia_qa' else batch['input_ids'].shape[1]
             generations = torch.ones((number_of_generations, input_length + max_length_of_generated_sequence),
                                      dtype=torch.long,
                                      device=device)
@@ -141,15 +182,23 @@ def get_generations(model, dataloader, number_of_generations):
             generations = torch.reshape(generations, (-1, number_of_generations, generations.shape[-1]))
             for i in range(generations.shape[0]):
 
-                few_shot_question = tokenizer.decode(input_ids[0])
-                question = few_shot_question.split('Question: ')[-1].split('Answer: ')[0]
-                sequence_dict = {
-                    'prompt': input_ids[0],
-                    'generations': generations[i],
-                    'id': batch['question_id'],
-                    'few_shot_question': tokenizer.decode(input_ids[0]),
-                    'question': question
-                }
+                if args.dataset == 'coqa' or args.dataset == 'pubmedqa':
+                    sequence_dict = {
+                        'prompt': batch['input_ids'][i].to('cpu'),
+                        'generations': generations[i].to('cpu'),
+                        'id': batch['id'],
+                        'question': id_to_question_mapping[batch['id'][0]]
+                    }
+                elif args.dataset == 'trivia_qa':
+                    few_shot_question = tokenizer.decode(input_ids[0])
+                    question = few_shot_question.split('Question: ')[-1].split('Answer: ')[0]
+                    sequence_dict = {
+                        'prompt': input_ids[0],
+                        'generations': generations[i],
+                        'id': batch['question_id'],
+                        'few_shot_question': tokenizer.decode(input_ids[0]),
+                        'question': question
+                    }
 
                 generated_texts = []
                 for generation in generations[i]:
@@ -160,7 +209,6 @@ def get_generations(model, dataloader, number_of_generations):
                 sequence_dict['most_likely_generation_ids'] = most_likely_generation[0].to('cpu')
                 sequence_dict['most_likely_generation'] = tokenizer.decode(
                     most_likely_generation[0][input_length:], skip_special_tokens=True)
-
                 sequence_dict['second_most_likely_generation_ids'] = most_likely_generation[1].to('cpu')
                 sequence_dict['second_most_likely_generation'] = tokenizer.decode(
                     most_likely_generation[1][input_length:], skip_special_tokens=True)
@@ -188,16 +236,21 @@ def get_generations(model, dataloader, number_of_generations):
                     for j in range(len(generated_texts)):
                         sequence_dict[rouge_type + '_to_target_{}'.format(j)] = 0.0
 
-                sequence_dict['answer'] = batch['answer']
-                sequence_dict['additional_answers'] = None
+                sequence_dict['answer'] = batch['answer']['text'] if args.dataset == 'coqa' or args.dataset == 'pubmedqa' else batch['answer']
+                sequence_dict['additional_answers'] = [x[0] for x in batch['additional_answers']
+                                                      ] if args.dataset == 'coqa' else None
 
                 sequence_dict['exact_match'] = 0.0
                 sequence_dict['exact_match_second'] = 0.0
                 for j in range(len(generated_texts)):
                     sequence_dict['exact_match_{}'.format(j)] = 0.0
 
-                reference_answers = batch['answer']
-
+                if args.dataset == 'coqa':
+                    reference_answers = batch['answer']['text'] + [x[0] for x in batch['additional_answers']]
+                elif args.dataset == 'pubmedqa':
+                    reference_answers = batch['answer']['text']
+                else:
+                    reference_answers = batch['answer']
                 for answer in reference_answers:
                     predictions = [sequence_dict['most_likely_generation'].lstrip()]
                     references = [answer]
@@ -208,7 +261,7 @@ def get_generations(model, dataloader, number_of_generations):
                     sequence_dict['exact_match'] = max(results['exact_match'], sequence_dict['exact_match'])
                     rouge_results = rouge.compute(predictions=predictions, references=references)
                     for rouge_type in rouge_types:
-                        sequence_dict[rouge_type + '_to_target'] = max(rouge_results[rouge_type].mid.fmeasure,
+                        sequence_dict[rouge_type + '_to_target'] = max(rouge_results[rouge_type],
                                                                        sequence_dict[rouge_type + '_to_target'])
                     predictions = [sequence_dict['second_most_likely_generation'].lstrip()]
                     references = [answer]
@@ -219,7 +272,7 @@ def get_generations(model, dataloader, number_of_generations):
                     sequence_dict['exact_match_second'] = max(results['exact_match'], sequence_dict['exact_match_second'])
                     rouge_results = rouge.compute(predictions=predictions, references=references)
                     for rouge_type in rouge_types:
-                        sequence_dict[rouge_type + '_to_target_second'] = max(rouge_results[rouge_type].mid.fmeasure,
+                        sequence_dict[rouge_type + '_to_target_second'] = max(rouge_results[rouge_type],
                                                                        sequence_dict[rouge_type + '_to_target_second'])
                     for j in range(len(generated_texts)):
                         predictions = [sequence_dict['generated_texts'][j].lstrip()]
@@ -231,7 +284,7 @@ def get_generations(model, dataloader, number_of_generations):
                         sequence_dict['exact_match'] = max(results['exact_match'], sequence_dict['exact_match_{}'.format(j)])
                         rouge_results = rouge.compute(predictions=predictions, references=references)
                         for rouge_type in rouge_types:
-                            sequence_dict[rouge_type + '_to_target_{}'.format(j)] = max(rouge_results[rouge_type].mid.fmeasure,
+                            sequence_dict[rouge_type + '_to_target_{}'.format(j)] = max(rouge_results[rouge_type],
                                                                            sequence_dict[rouge_type + '_to_target_{}'.format(j)])
 
                 sequences.append(sequence_dict)
@@ -244,7 +297,7 @@ def get_generations(model, dataloader, number_of_generations):
     return sequences
 
 
-sequences = get_generations(model, dataset, args.num_generations_per_prompt)
+sequences = get_generations(model, dataloader, args.num_generations_per_prompt)
 
 cleaned_sequences = []
 
@@ -257,7 +310,7 @@ for sample in tqdm.tqdm(sequences):
 
     strings_to_filter_on = [
         '.', '\n', 'Q:', 'A:', 'question:', 'answer:', 'Question:', 'Answer:', 'Questions:', 'questions:', 'QUESTION:',
-        'ANSWER:', ':', '000'
+        'ANSWER:', ':'
     ]
     if 'Meta-Llama-3' in f"{args.model}":
         strings_to_filter_on.append('000000')
@@ -293,7 +346,6 @@ for sample in tqdm.tqdm(sequences):
     sample['second_most_likely_generation'] = sample['cleaned_beam_search_generation_1']
 
     cleaned_sequences.append(sample)
-
 
 with open(f'{config.output_dir}/{args.model}_generations_all_{args.dataset}.pkl', 'wb') as outfile:
     pickle.dump(cleaned_sequences, outfile)

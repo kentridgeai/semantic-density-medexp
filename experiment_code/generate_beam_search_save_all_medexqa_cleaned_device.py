@@ -6,7 +6,7 @@ from lib2to3.pgen2.tokenize import tokenize
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--type_of_question', type=str)
-parser.add_argument('--num_generations_per_prompt', type=int, default=10)
+parser.add_argument('--num_generations_per_prompt', type=int, default=5)
 parser.add_argument('--fraction_of_data_to_use', type=float, default=0.9)
 parser.add_argument('--model', type=str, default='opt-350m')
 parser.add_argument('--run_id', type=str, default='run_1')
@@ -14,7 +14,7 @@ parser.add_argument('--temperature', type=float, default='1.0')
 parser.add_argument('--num_beams', type=int, default='5')
 parser.add_argument('--decoding_method', type=str, default='beam_search')
 parser.add_argument('--top_p', type=float, default=1.0)
-parser.add_argument('--dataset', type=str, default='coqa')
+parser.add_argument('--dataset', type=str, default='medexqa')
 parser.add_argument('--cuda_device', type=str, default='0')
 args = parser.parse_args()
 
@@ -25,10 +25,10 @@ import evaluate
 import numpy as np
 import torch
 import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig, DataCollatorWithPadding
+from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig
 
 
-device = f"cuda:{args.cuda_device}" if torch.cuda.is_available() and args.cuda_device != '-1' else 'cpu'
+device = f"cuda:{args.cuda_device}" if torch.cuda.is_available() or args.cuda_device != '-1' else 'cpu'
 
 print(torch.cuda.device_count())
 print(torch.cuda.is_available())
@@ -80,7 +80,9 @@ elif f"{args.model}" in SUPPORTED_OTHER_LMS:
     if 'phi3' in f"{args.model}":
         tokenizer = AutoTokenizer.from_pretrained('microsoft/phi-3-mini-4k-instruct',
                         truncation_side="left")
-        model = Phi3ForCausalLM.from_pretrained("microsoft/phi-3-mini-4k-instruct")
+        model = Phi3ForCausalLM.from_pretrained("microsoft/phi-3-mini-4k-instruct",
+                                                 torch_dtype=torch.float16,
+                                                 cache_dir=config.hf_cache_dir)
 #     elif 'mistral' in f"{args.model}":
 #         tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-Instruct-v0.1",
 #                         truncation_side="left")
@@ -90,16 +92,17 @@ elif f"{args.model}" in SUPPORTED_OTHER_LMS:
         tokenizer = AutoTokenizer.from_pretrained("dmis-lab/meerkat-7b-v1.0",
                         truncation_side="left")
         tokenizer.pad_token = tokenizer.eos_token
-        model = AutoModelForCausalLM.from_pretrained("dmis-lab/meerkat-7b-v1.0") 
+        model = AutoModelForCausalLM.from_pretrained("dmis-lab/meerkat-7b-v1.0",
+                                                 torch_dtype=torch.float16,
+                                                 cache_dir=config.hf_cache_dir) 
     
 model.to(device)
 
-
-if args.dataset == 'coqa':
-    dataset = datasets.load_from_disk(f'{config.data_dir}/coqa_dataset')
+if args.dataset == 'medexqa':
+    dataset = datasets.load_from_disk(f'{config.data_dir}/medexqa_test_dataset')
     id_to_question_mapping = dict(zip(dataset['id'], dataset['question']))
 elif args.dataset == 'pubmedqa':
-    dataset = datasets.load_from_disk(f'{config.data_dir}/pubmedqa_test_dataset')
+    dataset = datasets.load_from_disk(f'{config.data_dir}/pubmedqa_')
     id_to_question_mapping = dict(zip(dataset['id'], dataset['question']))    
 elif args.dataset == 'trivia_qa':
     dataset = datasets.load_from_disk(f'{config.data_dir}/trivia_qa_{args.model}')
@@ -129,7 +132,7 @@ def encode_and_format_dataset(dataset):
     return dataset
 
 
-if args.dataset == 'coqa' or args.dataset == 'pubmedqa':
+if args.dataset == 'medexqa' or args.dataset == 'pubmedqa':
     questions = encode_and_format_dataset(train_dataset)
 elif args.dataset == 'trivia_qa':
     questions = train_dataset
@@ -137,7 +140,7 @@ elif args.dataset == 'trivia_qa':
 
 # collate_fn = DataCollatorWithPadding(tokenizer=tokenizer, return_tensors="pt")
 # dataloader = torch.utils.data.DataLoader(questions, batch_size=32, collate_fn=collate_fn)
-dataloader = torch.utils.data.DataLoader(questions, batch_size=4)
+dataloader = torch.utils.data.DataLoader(questions, batch_size=16)
 
 eos_tokens = ['Question:', ' Question:', '\n', 'Answer:', ' Answer:', 'Q:']
 if args.model in ['Meta-Llama-3-8B', 'Meta-Llama-3-70B']:
@@ -166,7 +169,7 @@ def get_generations(model, dataloader, number_of_generations):
                     continue
                 else:
                     question_id_set.add(batch['question_id'][0])
-                    
+
 #             dataset.set_format(type='torch', columns=['input_ids', 'attention_mask'], output_all_columns=True)
             encoded_inputs = tokenizer(batch['input'], padding='longest', truncation=True, add_special_tokens=True,  return_tensors="pt")                 
 #             input_ids = encoded_inputs['input_ids']
@@ -230,7 +233,7 @@ def get_generations(model, dataloader, number_of_generations):
                 sequence_dict = {}
 
                 # Determine the appropriate dataset-specific structure
-                if args.dataset == 'coqa' or args.dataset == 'pubmedqa':
+                if args.dataset == 'medexqa' or args.dataset == 'pubmedqa':
                     sequence_dict = {
                         'prompt': encoded_inputs['input_ids'][i].to('cpu'),
                         'generations': generations[i].to('cpu'),
@@ -261,7 +264,7 @@ def get_generations(model, dataloader, number_of_generations):
                 sequence_dict['second_most_likely_generation'] = tokenizer.decode(
                     most_likely_generation[i][1][input_length:], skip_special_tokens=True
                 )
-                
+
 #                 print(sequence_dict['most_likely_generation'])
 #                 print(sequence_dict['second_most_likely_generation'])                
 
@@ -284,8 +287,8 @@ def get_generations(model, dataloader, number_of_generations):
                     for j in range(len(generated_texts)):
                         sequence_dict[f'{rouge_type}_to_target_{j}'] = 0.0
 
-                sequence_dict['answer'] = batch['answer']['text'][i] if args.dataset in ['coqa', 'pubmedqa'] else batch['answer'][i]
-                sequence_dict['additional_answers'] = [x[0] for x in batch['additional_answers'][i]] if args.dataset == 'coqa' else None
+                sequence_dict['answer'] = batch['answer']['text'][i] if args.dataset in ['medexqa', 'pubmedqa'] else batch['answer'][i]
+                sequence_dict['additional_answers'] = batch['additional_answers'][0][i] if args.dataset == 'medexqa' else None
 
                 sequence_dict['exact_match'] = 0.0
                 sequence_dict['exact_match_second'] = 0.0
@@ -293,7 +296,13 @@ def get_generations(model, dataloader, number_of_generations):
                     sequence_dict[f'exact_match_{j}'] = 0.0
 
                 # Evaluation with ROUGE and Exact Match metrics
-                reference_answers = batch['answer']['text'][i] if args.dataset in ['coqa', 'pubmedqa'] else batch['answer'][i]
+#                 print(batch['additional_answers'])
+                if args.dataset == 'medexqa':
+                    reference_answers = [batch['answer']['text'][i],]  + [batch['additional_answers'][0][i],]
+                elif args.dataset == 'pubmedqa':
+                    reference_answers = batch['answer']['text'][i]  
+                else:
+                    reference_answers = batch['answer'][i]
                 if type(reference_answers) == list:
                     for answer in reference_answers:
                         predictions = [sequence_dict['most_likely_generation'].lstrip()]
@@ -366,7 +375,7 @@ def get_generations(model, dataloader, number_of_generations):
 #             generations = torch.reshape(generations, (-1, number_of_generations, generations.shape[-1]))
 #             for i in range(generations.shape[0]):
 
-#                 if args.dataset == 'coqa' or args.dataset == 'pubmedqa':
+#                 if args.dataset == 'medexqa' or args.dataset == 'pubmedqa':
 #                     sequence_dict = {
 #                         'prompt': encoded_inputs['input_ids'][i].to('cpu'),
 #                         'generations': generations[i].to('cpu'),
@@ -420,16 +429,16 @@ def get_generations(model, dataloader, number_of_generations):
 #                     for j in range(len(generated_texts)):
 #                         sequence_dict[rouge_type + '_to_target_{}'.format(j)] = 0.0
 
-#                 sequence_dict['answer'] = batch['answer']['text'] if args.dataset == 'coqa' or args.dataset == 'pubmedqa' else batch['answer']
+#                 sequence_dict['answer'] = batch['answer']['text'] if args.dataset == 'medexqa' or args.dataset == 'pubmedqa' else batch['answer']
 #                 sequence_dict['additional_answers'] = [x[0] for x in batch['additional_answers']
-#                                                       ] if args.dataset == 'coqa' else None
+#                                                       ] if args.dataset == 'medexqa' else None
 
 #                 sequence_dict['exact_match'] = 0.0
 #                 sequence_dict['exact_match_second'] = 0.0
 #                 for j in range(len(generated_texts)):
 #                     sequence_dict['exact_match_{}'.format(j)] = 0.0
 
-#                 if args.dataset == 'coqa':
+#                 if args.dataset == 'medexqa':
 #                     reference_answers = batch['answer']['text'] + [x[0] for x in batch['additional_answers']]
 #                 elif args.dataset == 'pubmedqa':
 #                     reference_answers = batch['answer']['text']
@@ -531,5 +540,5 @@ for sample in tqdm.tqdm(sequences):
 
     cleaned_sequences.append(sample)
 
-with open(f'{config.output_dir}/{args.model}_generations_all_noprompt_{args.dataset}.pkl', 'wb') as outfile:
+with open(f'{config.output_dir}/{args.model}_generations_all_{args.dataset}.pkl', 'wb') as outfile:
     pickle.dump(cleaned_sequences, outfile)

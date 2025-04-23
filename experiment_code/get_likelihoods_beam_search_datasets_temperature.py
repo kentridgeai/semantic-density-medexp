@@ -5,8 +5,7 @@ import random
 import tqdm
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--evaluation_model', type=str, default='opt-350m')
-parser.add_argument('--generation_model', type=str, default='opt-350m')
+parser.add_argument('--model', type=str, default='opt-350m')
 parser.add_argument('--run_id', type=str, default='run_1')
 parser.add_argument('--dataset', type=str, default='NQ')
 parser.add_argument('--temperature', type=float, default=1.0)
@@ -14,31 +13,31 @@ parser.add_argument('--cuda_device', type=str, default="0")
 args = parser.parse_args()
 print(args)
 
-os.environ["CUDA_VISIBLE_DEVICES"]=args.cuda_device
-
-
 import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import wandb
 import math
-
-
-device = 'cuda'
 import config
 
-num_beams = 10
+device = f"cuda:{args.cuda_device}" if torch.cuda.is_available() and args.cuda_device != '-1' else 'cpu'
+
+print(torch.cuda.device_count())
+print(torch.cuda.is_available())
+
 # Set a seed value
-seed_value = 3
+seed_value = 10
+num_beams = 10
 # 1. Set `PYTHONHASHSEED` environment variable at a fixed value
+import os
 
 os.environ['PYTHONHASHSEED'] = str(seed_value)
 # 2. Set `python` built-in pseudo-random generator at a fixed value
+import random
 
 random.seed(seed_value)
 # 3. Set `numpy` pseudo-random generator at a fixed value
-
 np.random.seed(seed_value)
 
 #Fix torch random seed
@@ -47,29 +46,54 @@ torch.manual_seed(seed_value)
 os.environ["HF_DATASETS_CACHE"] = config.hf_datasets_cache
 
 mistralai_models = ['Mistral-7B-v0.1', 'Mixtral-8x7B-v0.1', 'Mixtral-8x22B-v0.1']
-llama_models = ['Llama-2-13b-hf', 'Llama-2-70b-hf', 'Meta-Llama-3-8B', 'Meta-Llama-3-8B-Instruct', 'Meta-Llama-3-70B', 'Meta-Llama-3-70B-Instruct']
+llama_models = ['Llama-2-13b-hf', 'Llama-2-70b-hf', 'Meta-Llama-3-8B', 'Meta-Llama-3-8B-Instruct', 'Meta-Llama-3-70B', 'Llama-2-7b-hf']
+SUPPORTED_OTHER_LMS = ['phi3', 'meerkat7b']
 
+if f"{args.model}" in mistralai_models:
+    hf_model_dir = 'mistralai/' + f"{args.model}"
 
-if f"{args.evaluation_model}" in mistralai_models:
-    hf_model_dir = 'mistralai/' + f"{args.evaluation_model}"
+if f"{args.model}" in llama_models:
+    hf_model_dir = 'meta-llama/' + f"{args.model}"
 
-if f"{args.evaluation_model}" in llama2_models:
-    hf_model_dir = 'meta-llama/' + f"{args.evaluation_model}"
+print("before loading model")
+isInstructMdl = False
+if f"{args.model}" in llama_models or f"{args.model}" in mistralai_models:
+    # tokenizer = AutoTokenizer.from_pretrained(hf_model_dir, use_fast=False, cache_dir=config.hf_cache_dir)
+    tokenizer = AutoTokenizer.from_pretrained(hf_model_dir, use_fast=False, cache_dir=config.hf_cache_dir, padding_side='left')
+    tokenizer.pad_token = tokenizer.eos_token
 
+    model = AutoModelForCausalLM.from_pretrained(hf_model_dir,
+                                                 torch_dtype=torch.float16,
+                                                 temperature = 3.5 , do_sample = True,
+                                                 cache_dir=config.hf_cache_dir)
+    #                                              cache_dir=config.hf_cache_dir, device_map="auto")
+    model.config.pad_token_id = model.config.eos_token_id
 
-model = AutoModelForCausalLM.from_pretrained(hf_model_dir,
-                                             torch_dtype=torch.float16,
-                                             cache_dir=config.hf_cache_dir, device_map="auto")
-tokenizer = AutoTokenizer.from_pretrained(hf_model_dir,
-                                          use_fast=False,
-                                          cache_dir=config.data_dir)
+elif f"{args.model}" in SUPPORTED_OTHER_LMS:
+    isInstructMdl = True
+    if 'phi3' in f"{args.model}":
+        tokenizer = AutoTokenizer.from_pretrained('microsoft/phi-3-mini-4k-instruct',
+                        truncation_side="left")
+        model = Phi3ForCausalLM.from_pretrained("microsoft/phi-3-mini-4k-instruct")
+#     elif 'mistral' in f"{args.model}":
+#         tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-Instruct-v0.1",
+#                         truncation_side="left")
+#         tokenizer.pad_token = self._tokenizer.eos_token
+#         model = AutoModelForCausalLM.from_pretrained("mistralai/Mistral-7B-Instruct-v0.1")                
+    elif 'meerkat' in f"{args.model}":
+        tokenizer = AutoTokenizer.from_pretrained("dmis-lab/meerkat-7b-v1.0",
+                        truncation_side="left")
+        tokenizer.pad_token = tokenizer.eos_token
+        model = AutoModelForCausalLM.from_pretrained("dmis-lab/meerkat-7b-v1.0") 
+    
+model.to(device)
 
-tokenizer.pad_token_id = 1
-
-with open(f'{config.output_dir}/{args.generation_model}_generations_all_{args.dataset}.pkl', 'rb') as infile:
+# with open(f'{config.output_dir}/{args.model}_generations_all_{args.dataset}.pkl', 'rb') as infile:
+with open(f'{config.output_dir}/{args.model}_generations_all_{args.dataset}.pkl', 'rb') as infile:
     sequences = pickle.load(infile)
 
-with open(f'{config.output_dir}/{args.generation_model}_generations_similarities_all_{args.dataset}.pkl', 'rb') as infile:
+# with open(f'{config.output_dir}/{args.model}_generations_similarities_all_{args.dataset}.pkl', 'rb') as infile:
+with open(f'{config.output_dir}/{args.model}_generations_similarities_all_{args.dataset}.pkl', 'rb') as infile:
     similarities_dict = pickle.load(infile)
 
 
@@ -101,12 +125,11 @@ def get_neg_loglikelihoods(model, sequences):
                 if target_ids[-1] == 4:
                     target_ids = target_ids[:-1]
                     generation = generation[:-1]
-                model_output = model(torch.reshape(generation, (1, -1)), labels=target_ids, output_hidden_states=True, temperature=args.temperature)
+                model_output = model(torch.reshape(generation, (1, -1)), labels=target_ids, output_hidden_states=True) #,temperature=args.temperature)
                 generation_only = generation.clone()[(len(prompt) - 1):]
                 unconditioned_model_output = model(torch.reshape(generation_only, (1, -1)),
                                                    labels=generation_only,
-                                                   output_hidden_states=True,
-                                                   temperature=args.temperature)
+                                                   output_hidden_states=True) #,temperature=args.temperature)
                 hidden_states = model_output['hidden_states']
                 average_neg_log_likelihood = model_output['loss']
 
@@ -130,8 +153,7 @@ def get_neg_loglikelihoods(model, sequences):
                 most_likely_generation = most_likely_generation[:-1]
             model_output = model(torch.reshape(most_likely_generation, (1, -1)),
                                  labels=target_ids,
-                                 output_hidden_states=True,
-                                 temperature=args.temperature)
+                                 output_hidden_states=True) #,temperature=args.temperature)
             hidden_states = model_output['hidden_states']
             average_neg_log_likelihood_of_most_likely_gen = model_output['loss']
             most_likely_generation_embedding = torch.mean(hidden_states[-1], dim=1)
@@ -143,8 +165,7 @@ def get_neg_loglikelihoods(model, sequences):
                 second_most_likely_generation = second_most_likely_generation[:-1]
             model_output = model(torch.reshape(second_most_likely_generation, (1, -1)),
                                  labels=target_ids,
-                                 output_hidden_states=True,
-                                 temperature=args.temperature)
+                                 output_hidden_states=True) #,temperature=args.temperature)
             hidden_states = model_output['hidden_states']
             average_neg_log_likelihood_of_second_most_likely_gen = model_output['loss']
             second_most_likely_generation_embedding = torch.mean(hidden_states[-1], dim=1)
@@ -161,8 +182,7 @@ def get_neg_loglikelihoods(model, sequences):
                     beam_search_generation = beam_search_generation[:-1]
                 model_output = model(torch.reshape(beam_search_generation, (1, -1)),
                                      labels=target_ids,
-                                     output_hidden_states=True,
-                                     temperature=args.temperature)
+                                     output_hidden_states=True) #,temperature=args.temperature)
                 hidden_states = model_output['hidden_states']
                 result_dict['average_neg_log_likelihood_of_beam_search_gen_{}'.format(beam_index)]= model_output['loss']
                 result_dict['beam_search_generation_embedding_{}'.format(beam_index)] = torch.mean(hidden_states[-1], dim=1)
@@ -180,7 +200,7 @@ def get_neg_loglikelihoods(model, sequences):
             result_dict['average_neg_log_likelihood_of_most_likely_gen'] = average_neg_log_likelihood_of_most_likely_gen
             result_dict['average_neg_log_likelihood_of_second_most_likely_gen'] = average_neg_log_likelihood_of_second_most_likely_gen
             result_dict['neg_log_likelihood_of_most_likely_gen'] = neg_log_likelihood_of_most_likely_gen
-            result_dict['semantic_set_ids'] = torch.tensor(similarities_dict[id_[0]]['semantic_set_ids'], device=device)
+            result_dict['semantic_set_ids'] = torch.tensor(similarities_dict[id_]['semantic_set_ids'], device=device)
             result_dict['average_neg_log_likelihood_of_beam_search'] = average_neg_log_likelihood_of_beam_search
             result_dict['id'] = id_
             result.append(result_dict)
@@ -190,6 +210,13 @@ def get_neg_loglikelihoods(model, sequences):
 
 likelihoods = get_neg_loglikelihoods(model, sequences)
 
-with open(f'{config.data_dir}/{args.generation_model}_generations_{args.evaluation_model}_likelihoods_all_{args.dataset}_temperature{args.temperature}.pkl',
+# print(likelihoods)
+
+# with open(f'{config.output_dir}/{args.model}_generations_likelihoods.txt', "a+") as text_file:
+#     print(likelihoods, file=text_file)
+#     print("/n")
+
+print(f'saving to {config.output_dir}/{args.model}_generations_{args.model}_likelihoods_all_{args.dataset}_temperature{args.temperature}.pkl')
+with open(f'{config.output_dir}/{args.model}_generations_{args.model}_likelihoods_all_{args.dataset}_temperature{args.temperature}.pkl',
           'wb') as outfile:
     pickle.dump(likelihoods, outfile)

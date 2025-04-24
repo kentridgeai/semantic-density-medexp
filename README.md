@@ -1,5 +1,5 @@
 # semantic-density-medexp
-This repo will contain the source code for reproducing the experimental results reported in paper: "TINY: Semantic-based Uncertainty Quantification in LLMS: A Case Study on Medical Explanation Generation Task.", which is accepted to ICLR 2025 QUESTION workshop. [Paper on OpenReview](https://openreview.net/forum?id=54xTSlq9ts)
+This repo contains the source code for reproducing the experimental results reported in paper: "TINY: Semantic-based Uncertainty Quantification in LLMS: A Case Study on Medical Explanation Generation Task.", which is accepted to ICLR 2025 QUESTION workshop. [Paper on OpenReview](https://openreview.net/forum?id=54xTSlq9ts)
 
 ## Environment Setup
 
